@@ -1,29 +1,25 @@
-CFLAGS=-lpcap -pthread -lssl
+CFLAGS=-O3 -lpcap -pthread -lssl
 BINDIR=/usr/local/bin
+CLIENT=repliclient
+SERVER=repliserver
 
-all: extmon runmonv2
+all: client server 
 
-runmon: ethernet.h helpers.c helpers.h ip4.h linked_list.c linked_list.h linked_list_node.h runmon.c runmon.h sip.h tcp.h term.h udp.h
-	gcc -o runmon ${CFLAGS} helpers.c linked_list.c runmon.c 
-	sudo chown root runmon
-	sudo chmod u+s runmon
+client: client.c helpers.c 
+	gcc -o ${CLIENT} ${CFLAGS} helpers.c client.c 
+	sudo chown root ${CLIENT}
+	sudo chmod u+s ${CLIENT}
 
-extmon: extmon.c helpers.c 
-	gcc -o extmon ${CFLAGS} helpers.c extmon.c 
-	sudo chown root extmon
-	sudo chmod u+s extmon
-
-runmonv2: ethernet.h helpers.c helpers.h ip4.h linked_list.c linked_list.h linked_list_node.h runmonv2.c runmon.h sip.h tcp.h term.h udp.h
-	gcc -o runmonv2 ${CFLAGS} helpers.c linked_list.c runmonv2.c 
-	sudo chown root runmon
-	sudo chmod u+s runmon
+server: ethernet.h helpers.c helpers.h ip4.h linked_list.c linked_list.h linked_list_node.h server.c packet.h sip.h tcp.h udp.h
+	gcc -o ${SERVER} ${CFLAGS} helpers.c linked_list.c server.c 
+	sudo chown root ${SERVER} 
+	sudo chmod u+s ${SERVER}
 
 clean:
-	rm -f runmon
-	rm -f runmonv2
-	rm -f exmon
+	rm -f ${CLIENT} 
+	rm -f ${SERVER}
 
-install: runmon
-	sudo rsync -aH runmon ${BINDIR}/  
+install: server client
+	sudo rsync -aH ${SERVER} ${CLIENT} ${BINDIR}/  
 uninstall: 
-	sudo rm -f ${BINDIR}/runmon
+	sudo rm -f ${BINDIR}/{${SERVER},${CLIENT}}

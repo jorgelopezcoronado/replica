@@ -15,7 +15,7 @@
 #include <stdlib.h>
 #include <pcap.h>
 #include "helpers.h" 
-#include "runmon.h" 
+#include "packet.h" 
 
 #define MAX_PORT_NUM 65535
 #define PENDING_CONNS_Q 10
@@ -169,550 +169,55 @@ char *create_string_from_text_payload(char *payload, int size)
 	return string_form;
 }
 
-void release_sip(sip_packet *sip)
-{
-	char *start_of_text = (sip->start_line->method)?sip->start_line->method:sip->start_line->version;
-	free(start_of_text);
-	free(sip->start_line);
-	while(sip->header_fields->head)
-		free(linked_list_delete(sip->header_fields));
-	linked_list_delete(sip->header_fields);
-	//not free sip->message_body, since message boddy is part of the main start of text when allocating.
-	free(sip);
-}
-
 /*
- * proccess_sip: process the payload and convert it to a sip struct
+ * release_packet: frees packet resources if no longer needed. Important, 
  */
-
-sip_packet *process_sip(u_char *payload, int payload_size)
+void release_packet(packet* p)
 {
-	char* sip_text = create_string_from_text_payload(payload, payload_size);
-	char *message_body, *temp_string;
-	char *start_line_text = strtok_r(sip_text, CRLF, &message_body);
-	int size = 0, i = 0;
-	char *save_ptr = NULL;
-	start_line_s *message_start_line =(start_line_s*)malloc(sizeof(start_line_s)); 
-	linked_list *header_fields = create_linked_list();
-	linked_list *header_fields_text = create_linked_list();
-	sip_packet *sip = (sip_packet*)malloc(sizeof(sip_packet));	
-	void *header_field_value;
-
-#define MIN_SIP_TEXT_LENGTH 7 //at least if should have SIP/x.y version in the string text, else this is a corrupt package.
-
-	if(strlen(sip_text) < MIN_SIP_TEXT_LENGTH)
-	{
-		free(sip_text);
-		free(message_start_line);
-		linked_list_delete(header_fields);	
-		linked_list_delete(header_fields_text);
-		free(sip);
-		return NULL;
-	}
-
-	while (temp_string  = strtok_r(NULL, CRLF, &message_body))
-	{	
-		//Since splitting will leave \n at the begining I'll remove this \n
-		if(*temp_string == '\n') temp_string++;
-		//When only a newline is present, futher removed, that means the body message is up next.
-		if (strcmp(temp_string, "") == 0) break;
-		//here I just make sure folding won't affect my application
-		if (!isspace(*temp_string)) 
-			linked_list_add(header_fields_text, temp_string);
-		else //I need to add the content to the previous header field
-			strcat(((char*)linked_list_get(header_fields_text)), temp_string);
-	}
-	
-	temp_string = strtok_r(start_line_text, " ", &save_ptr);
-
-	if(strcasecmp(temp_string, "REGISTER") == 0 || strcasecmp(temp_string, "INVITE") == 0 || strcasecmp(temp_string, "ACK") == 0 || strcasecmp(temp_string, "CANCEL") == 0 || strcasecmp(temp_string, "BYE") == 0 || strcasecmp(temp_string, "OPTIONS") == 0 || strcasecmp(temp_string, "SUBSCRIBE") == 0 || strcasecmp(temp_string, "NOTIFY") == 0 ) // http://tools.ietf.org/html/rfc3261#page-26 request methods definition and extension http://www.ietf.org/rfc/rfc3265.txt
-	{
-
-		message_start_line->method = temp_string;	
-		message_start_line->request_URI = strtok_r(NULL, " ", &save_ptr);
-		message_start_line->version = save_ptr;
-		message_start_line->status_code = 0;;
-		message_start_line->reason_phrase = NULL;
-	}
-	else // it is status line actually
-	{
-		message_start_line->method= NULL;
-		message_start_line->request_URI = NULL;
-		message_start_line->version = temp_string;
-		message_start_line->status_code = (short)atoi(strtok_r(NULL, " ", &save_ptr));
-		message_start_line->reason_phrase = save_ptr;
-	}
-
-	if (linked_list_transverse(header_fields_text, &header_field_value))
-	{
-		header_field *headerfield = (header_field*)malloc(sizeof(header_field) * 1);
-		headerfield->name = strtok_r((char*)header_field_value, ":", (char**)&headerfield->value);
-		strtrim(&headerfield->name);
-                strtrim(&headerfield->value);
-                linked_list_add(header_fields, headerfield);
-	}
-	while (linked_list_transverse(NULL, &header_field_value))	
-	{
-		header_field *headerfield = (header_field*)malloc(sizeof(header_field) * 1);
-		headerfield->name = strtok_r((char*)header_field_value, ":", (char**)&headerfield->value);
-		strtrim(&headerfield->name);
-		strtrim(&headerfield->value);
-		linked_list_add(header_fields, headerfield);
-	}
-	delete_linked_list(header_fields_text);
-
-	strtrim(&message_body);
-
-	sip->start_line = message_start_line;
-	sip->header_fields = header_fields;
-	sip->message_body = message_body;
-
-	return sip;
-}
-
-void print_sip(sip_packet *sip)
-{
-	int i = 0;
-	void *header_field_value;
-	linked_list *header_fields = sip->header_fields;
-	
-	if(!DEBUG)
-		return;
-	
-	if (sip->start_line->method != NULL)
-		printf("Method: %s Request_URI: %s Version: %s\n", sip->start_line->method, sip->start_line->request_URI, sip->start_line->version);
-	else
-		printf("Version: %s Status Code: %i Reason Phrase: %s\n", sip->start_line->version, sip->start_line->status_code, sip->start_line->reason_phrase);
-
-	if(linked_list_transverse(sip->header_fields, &header_field_value))
-	{
-		header_field *headerfield = (header_field*)header_field_value;
-		printf("%s->%s\n", headerfield->name, headerfield->value);
-	}
-
-	while (linked_list_transverse(NULL, &header_field_value))
-        {
-                header_field *headerfield = (header_field*)header_field_value;
-                printf("%s->%s\n", headerfield->name, headerfield->value);
-        }
-
-	printf("\n%s\n", sip->message_body);
-}
-
-
-
-/*
- * process_dns_name: auxiliary function to 
- */
-u_char *process_dns_name(u_char *payload, u_char **pointer)
-{
-        u_char *data_ptr = *pointer;
-        int i = 0, chars = (int)*data_ptr, jump = 0, length = 0;
-	u_char *result = NULL;
-
-	if(((chars & 0xC0) >> 6) == 3)//fist two bits are on, we have a jump
-	{
-		jump = ((*data_ptr & 0x3F) << 8) + *(data_ptr + 1);
-		data_ptr = payload + jump;
-		chars = (int)*data_ptr;
-		*pointer = *pointer + 2;
-	}
-	
-	//if we are at this point it means we need to process the string
-		
-        while(chars)
-        {    
-		length += chars + 1;
-		result = (u_char*)realloc(result, length * sizeof(u_char));
-                for(i = 0; i <= chars; i++) 
-                      *(result + length - (chars + 1) + i) = *(data_ptr++); 
-		if(!jump)
-			*pointer = *pointer + chars + 1;
-                chars = (int)*data_ptr;
-		if(((chars & 0xC0) >> 6) == 3)//fist two bits are on, we have a jump
-        	{
-			jump = ((*data_ptr & 0x3F) << 8) + *(data_ptr + 1);
-			data_ptr = payload + jump;
-               		chars = (int)*data_ptr;
-		}
-		else if(!jump && !chars)
-			*pointer = *pointer + 1;
-        }	
-	length++;
-	result = (u_char*)realloc(result, length * sizeof(u_char));
-	*(result + length -1) = 0;
-
-	return result;
-}
-
-/*
- * process_dns: function to map a packet to a dns_packet structure
- */
-dns_packet *process_dns(u_char *payload, int payload_size)
-{
-	dns_packet *dns = (dns_packet*)malloc(1 * sizeof(dns_packet));
-	dns->header = (dns_header_t*)payload;
-	linked_list *queries = NULL, *answers = NULL, *auth_servers = NULL, *additional_records = NULL;
-	dns_query_t *dns_query = NULL;
-	dns_resource_record_t *dns_resource_record = NULL;
-	u_char *ptr = payload + sizeof(dns_header_t);
-	int i = 0;
-	
-	queries = create_linked_list();
-	answers = create_linked_list();
-	auth_servers = create_linked_list();
-	additional_records = create_linked_list();
-
-	for (i = 0; i < ntohs(dns->header->query_count); i++)
-	{
-		dns_query = (dns_query_t*)malloc(1 * sizeof(dns_query_t));
-		dns_query->name = process_dns_name(payload, &ptr);		
-		dns_query->type = *(u_short*)ptr;
-		ptr = ptr + sizeof(u_short);
-		dns_query->class = *(u_short*)ptr;
-		ptr = ptr + sizeof(u_short);
-		linked_list_add(queries, dns_query);
-	}
-
-	for (i = 0; i < ntohs(dns->header->answer_count); i++)
-        {
-		dns_resource_record = (dns_resource_record_t*)malloc(1 * sizeof(dns_resource_record_t));
-		dns_resource_record->name = process_dns_name(payload, &ptr);		
-		dns_resource_record->type = *(u_short*)ptr;
-                ptr = ptr + sizeof(u_short);
-		dns_resource_record->class = *(u_short*)ptr;
-		ptr = ptr + sizeof(u_short);
-		dns_resource_record->TTL = *(u_int*)ptr;
-		ptr = ptr + sizeof(u_int);
-		dns_resource_record->data_length = *(u_short*)ptr;
-                ptr = ptr + sizeof(u_short);
-                dns_resource_record->data = (u_char*)ptr;
-                ptr = ptr + htons(dns_resource_record->data_length);
-		linked_list_add(answers, dns_resource_record);
-	}	
-		
-	for (i = 0; i < ntohs(dns->header->auth_servers_count); i++)
-        {
-                dns_resource_record = (dns_resource_record_t*)malloc(1 * sizeof(dns_resource_record_t));
-                dns_resource_record->name = process_dns_name(payload, &ptr);
-                dns_resource_record->type = *(u_short*)ptr;
-                ptr = ptr + sizeof(u_short);
-                dns_resource_record->class = *(u_short*)ptr;
-                ptr = ptr + sizeof(u_short);
-                dns_resource_record->TTL = *(u_int*)ptr;
-                ptr = ptr + sizeof(u_int);
-                dns_resource_record->data_length = *(u_short*)ptr;
-                ptr = ptr + sizeof(u_short);
-                dns_resource_record->data = (u_char*)ptr;
-                ptr = ptr + htons(dns_resource_record->data_length);
-               	linked_list_add(auth_servers, dns_resource_record);
-        }
-
-	for (i = 0; i < ntohs(dns->header->additional_records_count); i++)
-        {
-                dns_resource_record = (dns_resource_record_t*)malloc(1 * sizeof(dns_resource_record_t));
-                dns_resource_record->name = process_dns_name(payload, &ptr);
-                dns_resource_record->type = *(u_short*)ptr;
-                ptr = ptr + sizeof(u_short);
-                dns_resource_record->class = *(u_short*)ptr;
-                ptr = ptr + sizeof(u_short);
-                dns_resource_record->TTL = *(u_int*)ptr;
-                ptr = ptr + sizeof(u_int);
-                dns_resource_record->data_length = *(u_short*)ptr;
-                ptr = ptr + sizeof(u_short);
-                dns_resource_record->data = (u_char*)ptr;
-		ptr = ptr + htons(dns_resource_record->data_length);
-                linked_list_add(additional_records, dns_resource_record);
-        }
-	dns->queries = queries;	
-	dns->answers = answers;
-	dns->auth_servers = auth_servers;
-	dns->additional_records = additional_records;
-
-	return dns;
-}
-
-/*
- * release_dns: frees all memory resources of a DNS packet
- */
-
-void release_dns(dns_packet *dns)
-{
-	//free(dns->header); //why this matching way won't get released? pointer already gone? 
-	int i = 0;
-	dns_query_t *query = NULL;
-	dns_resource_record_t *resource_record = NULL;
-	while(dns->queries->head != NULL)
-        {
-		query = linked_list_delete(dns->queries);
-		free(query->name);
-		free(query);
-	}
-	delete_linked_list(dns->queries);
-
-	while(dns->answers->head != NULL)
-        {
-                resource_record = linked_list_delete(dns->answers);
-                free(resource_record->name);
-		//free(resource_record->data);
-                free(resource_record);
-        }
-        delete_linked_list(dns->answers);
-
-	while(dns->auth_servers->head != NULL)
-        {
-                resource_record = linked_list_delete(dns->auth_servers);
-                free(resource_record->name);
-		//free(resource_record->data);
-                free(resource_record);
-        }
-        delete_linked_list(dns->auth_servers);
-
-	while(dns->additional_records->head != NULL)
-        {
-                resource_record = linked_list_delete(dns->additional_records);
-                free(resource_record->name);
-		//free(resource_record->data);
-                free(resource_record);
-        }
-        delete_linked_list(dns->additional_records);
-	
-	free(dns);
-}
-
-/*
- * print_std_dns_notation: auxiliary function to display data in standard DNS notation
- */
-void print_std_dns_notation(u_char* data)
-{
-	u_char *data_ptr = data;
-	int i = 0, chars = (int)*data_ptr;
-	data_ptr++;
-	while(chars)
-	{
-		for(i = 0; i < chars; i++)
-			printf("%c",*(data_ptr + i));
-		printf(".");
-		data_ptr += chars;
-		chars = (int)*data_ptr;
-		data_ptr++;
-	}
-}
-
-
-/*
- * print_dns: function to print a DNS record
- */
-void print_dns(dns_packet *dns)
-{
-	linked_list_node *node = NULL;
-        dns_query_t *dns_query = NULL;
-        dns_resource_record_t *dns_resource_record = NULL;
-	int i = 0;
-
-	printf("ID: %i\n", ntohs(dns->header->id));	
-	printf("Flags: %i, is response: %i\n", ntohs(dns->header->flags), DNS_QR(dns->header));
-	printf("Query count: %i Answer count: %i Authoritative servers count: %i Additional records count: %i\n", ntohs(dns->header->query_count), ntohs(dns->header->answer_count), ntohs(dns->header->auth_servers_count), ntohs(dns->header->additional_records_count));
-	node = dns->queries->head;
-	printf("Queries:\n");
-	while(node)
-	{
-		dns_query = (dns_query_t*)node->element;
-		printf("\tName: ");
-		print_std_dns_notation(dns_query->name);
-		printf("\tType: %i Class: %i\n", ntohs(dns_query->type), ntohs(dns_query->class));
-		node = node->next;
-	}
-
-	node = dns->answers->head;
-	if(node)
-		printf("Answers:\n");
-	while(node)
-        {    
-                dns_resource_record = (dns_resource_record_t*)node->element;
-                printf("\tName: ");
-                print_std_dns_notation(dns_resource_record->name);
-                printf("\tType: %i Class: %i TTL: %i Data Length: %i\n\tData:", ntohs(dns_resource_record->type), ntohs(dns_resource_record->class), ntohl(dns_resource_record->TTL), ntohs(dns_resource_record->data_length));
-		for (i = 0; i < ntohs(dns_resource_record->data_length); i++)
-			printf("%x",*(dns_resource_record->data + i));
-		printf("\n");
-                node = node->next;
-        }
-
-	node = dns->auth_servers->head;
-	if(node)
-		printf("Authoritative Servers:\n");
-	while(node)
-        {    
-                dns_resource_record = (dns_resource_record_t*)node->element;
-                printf("\tName: ");
-                print_std_dns_notation(dns_resource_record->name);
-                printf("\tType: %i Class: %i TTL: %i Data Length: %i\n\tData:", ntohs(dns_resource_record->type), ntohs(dns_resource_record->class), ntohl(dns_resource_record->TTL), ntohs(dns_resource_record->data_length));
-		for (i = 0; i < ntohs(dns_resource_record->data_length); i++)
-			printf("%x",*(dns_resource_record->data + i));
-		printf("\n");
-                node = node->next;
-        }
-
-	node = dns->additional_records->head;
-	if(node)
-		printf("Additional Records:\n");
-	while(node)
-        {    
-                dns_resource_record = (dns_resource_record_t*)node->element;
-                printf("\tName: ");
-                print_std_dns_notation(dns_resource_record->name);
-                printf("\tType: %i Class: %i TTL: %i Data Length: %i\n\tData:", ntohs(dns_resource_record->type), ntohs(dns_resource_record->class), ntohl(dns_resource_record->TTL), ntohs(dns_resource_record->data_length));
-		for (i = 0; i < ntohs(dns_resource_record->data_length); i++)
-			printf("%x",*(dns_resource_record->data + i));
-		printf("\n");
-                node = node->next;
-        }
-	printf("\n");
-
-}
-
-/*
- * release_runmon_packet: frees runmon packet resources if no longer needed.
- */
-void release_runmon_packet(runmon_packet* packet)
-{
-	linked_list_node *node = packet->dependencies->head;
+	linked_list_node *node = p->dependencies->head;
 	linked_list_node *aux = NULL;
-	runmon_packet *dependency = NULL;
-	//free(packet->ethernet);
-	//free(packet->ip);
-	//free(packet->transport);
-	free(packet->time);
+	packet *dependency = NULL;
+	free(p->time);
 
-        switch(packet->protocol_type)
-        {   
-                case SIP:
-			if(packet->protocol_type)
-                        	release_sip((sip_packet*)packet->protocol);
-                        break;
-                case DNS:
-                        release_dns((dns_packet*)packet->protocol);
-                        break;
-                default:
-                        //LOG THIS!
-                break;
-        }	
+      	//free p->protocol 
 	
 	//free(packet->PO); //CONSIDER THIS AFTER! not sure if you'll use the same string... why not?
 	while (node)
 	{
-		dependency = (runmon_packet*)node->element;
+		dependency = (packet*)node->element;
 		dependency->associations--;
 		node = node->next;
 	}
-	delete_linked_list(packet->dependencies);
+	delete_linked_list(p->dependencies);
 	
-	free(packet->pkthdr);
-	free(packet->data);
+	free(p->pkthdr);
+	free(p->data);
 	
-	free(packet);
-}
-
-/*
- * eval_selector_from_packet: return a value by selecting the package matching value
- */
-
-void *eval_selector_from_packet(runmon_packet *packet, char *selector)
-{
-	char *label, *next_label = NULL;
-//	label = strtok(selector, &next_label);
-//	if(strcasecmp("ethernet", label) == 0)
-//	{
-//}
-}
-
-typedef unsigned char leafnode;
-
-#define VARIBLES_AMMOUNT_TO_BE_SAVED 3 //this will depend on properties 
-linked_list *saved_messages;
-linked_list *saved_messages_locks;
-unsigned long long *pass_verdicts, *fail_verdicts;
-char *current_status;
-
-#define LN_REQ_F_ADS 0
-#define LN_RES_F_ADS 1
-#define LN_REQ_NF_ADS_EQQ 2
-#define LN_RES_NF_ADS_EQA 3
-
-#define ADS_PO "ADS"
-
-/*
- * equal_queries: auxiliary function to compare two DNS packets queries.
- */
-BOOL equal_queries(dns_packet *packet1, dns_packet *packet2)
-{
-	linked_list_node *node1 = NULL, *node2 = NULL;
-	dns_query_t *query1 = NULL, *query2 = NULL;
-	if (packet1->header->query_count == packet2->header->query_count)
-	{
-		node1 = packet1->queries->head;
-		node2 = packet2->queries->head;
-		while(node1 && node2)
-		{
-			query1 = (dns_query_t*)node1->element;
-			query2 = (dns_query_t*)node2->element;
-			if(query1->class != query2->class || query1->type != query2->type || strcasecmp(query1->name, query2->name) != 0)
-				return FALSE;
-			node1 = node1->next;
-                	node2 = node2->next;
-		}
-	}
-	return TRUE;
-}
-
-/*
- * equal_answers: auxiliary function to compare two DNS packets answers. some code can be reused and use to compare compleletly RRs, ATM IDK
- */
-BOOL equal_answers(dns_packet *packet1, dns_packet *packet2)
-{
-	linked_list_node *node1 = NULL, *node2 = NULL;
-	dns_resource_record_t *answer1 = NULL, *answer2 = NULL;
-	if (packet1->header->answer_count == packet2->header->answer_count)
-	{
-		node1 = packet1->answers->head;
-		node2 = packet2->answers->head;
-		while(node1 && node2)
-		{
-			answer1 = (dns_resource_record_t*)node1->element;
-			answer2 = (dns_resource_record_t*)node2->element;
-			//no TTL since they can change
-			if(answer1->class != answer2->class || answer1->type != answer2->type || strcasecmp(answer1->name, answer2->name) != 0 || answer1->data_length != answer2->data_length || *((int*)answer1->data) !=  *((int*)answer2->data)) //for the time being I'm just comparing A records...
-				return FALSE;
-			node1 = node1->next;
-                	node2 = node2->next;
-		}
-	}
-	return TRUE;
+	free(p);
 }
 
 /*
  * match_ports_and_IPs: auxiliary function that helps determine if source port is and dest port matches responses of two packets
  */
-BOOL match_ports_and_IPs(runmon_packet *runmon1, runmon_packet *runmon2)
+BOOL match_ports_and_IPs(packet *p1, packet *p2)
 {
 	u_short p1sp, p1dp, p2sp, p2dp;
 	in_addr_t p1si, p1di, p2si, p2di;
 
-	//if(runmon1->transport_type != runmon2->transport_type)
+	//if(p1->transport_type != p2->transport_type)
 	//	return FALSE; //I'm uncertain if this is actually possible... leave without a check ATM
 
-	p1sp = (runmon1->transport_type == UDP)?((udph*)runmon1->transport)->uh_sport:((tcph*)runmon1->transport)->th_sport;
-	p1dp = (runmon1->transport_type == UDP)?((udph*)runmon1->transport)->uh_dport:((tcph*)runmon1->transport)->th_dport;
+	p1sp = (p1->transport_type == UDP)?((udph*)p1->transport)->uh_sport:((tcph*)p1->transport)->th_sport;
+	p1dp = (p1->transport_type == UDP)?((udph*)p1->transport)->uh_dport:((tcph*)p1->transport)->th_dport;
 
-	p2sp = (runmon2->transport_type == UDP)?((udph*)runmon2->transport)->uh_sport:((tcph*)runmon2->transport)->th_sport;
-	p2dp = (runmon2->transport_type == UDP)?((udph*)runmon2->transport)->uh_dport:((tcph*)runmon2->transport)->th_dport;
+	p2sp = (p2->transport_type == UDP)?((udph*)p2->transport)->uh_sport:((tcph*)p2->transport)->th_sport;
+	p2dp = (p2->transport_type == UDP)?((udph*)p2->transport)->uh_dport:((tcph*)p2->transport)->th_dport;
 
-	p1si = runmon1->ip->ip_src.s_addr;
-	p1di = runmon1->ip->ip_dst.s_addr;
+	p1si = p1->ip->ip_src.s_addr;
+	p1di = p1->ip->ip_dst.s_addr;
 	
-	p2si = runmon2->ip->ip_src.s_addr;
-	p2di = runmon2->ip->ip_dst.s_addr;
+	p2si = p2->ip->ip_src.s_addr;
+	p2di = p2->ip->ip_dst.s_addr;
 
 	if (p1sp != p2dp || p1dp != p2sp || p1si != p2di || p1di != p2si)
 		return FALSE;
@@ -721,170 +226,10 @@ BOOL match_ports_and_IPs(runmon_packet *runmon1, runmon_packet *runmon2)
 
 }
 
-/*
- * get_property_of_variable: function to get the property associated with a variable
- */
-int get_property_of_variable(int variable_index)//this will probably change for a struct var prototype or something like that
-{
-	return 1;
-}
-
-/*
- * match_packet_against_leafnode: function to 
- */
-void match_packet_against_leafnode(leafnode ln, runmon_packet *packet)
-{
-	dns_packet *dns = (dns_packet*)packet->protocol;
-	int index_of_var = 0;
-	pthread_mutex_t *lock = NULL;
-	linked_list *packet_list = NULL;
-	int index_of_x1 = 0, index_of_y1 = 1, index_of_a1 = 2;
-	linked_list_node *node = NULL;
-	runmon_packet *stored_packet = NULL, *auxiliary_packet = NULL, *auxiliary_packet2 = NULL;
-	dns_packet *stored_dns = NULL;
-	int i = 0;
-	
-	switch(ln)
-	{
-		
-		case LN_REQ_F_ADS: //check if it is a DNS reqeust from the ADS PO and save it in the LL
-			index_of_var = 0;
-			if(DNS_QR(dns->header) == 0 && strcasecmp(packet->PO,ADS_PO) == 0) //request from ADS
-			{
-                                lock = (pthread_mutex_t*)linked_list_get_nth(saved_messages_locks, index_of_var);
-                                pthread_mutex_lock(lock);
-                                packet_list = (linked_list*)linked_list_get_nth(saved_messages, index_of_var);
-                                packet->reference_count++;
-                                linked_list_add(packet_list, packet);
-                                pthread_mutex_unlock(lock);
-			}
-		break;
-		case LN_RES_F_ADS: //check if it's a DNS response from ADS, save it in the LL and add assocs
-			index_of_var = 1;
-			if(DNS_QR(dns->header) == 1 && strcasecmp(packet->PO,ADS_PO) == 0) //reply from ADS
-			{
-				lock = (pthread_mutex_t*)linked_list_get_nth(saved_messages_locks, index_of_x1);
-				pthread_mutex_lock(lock);
-				packet_list = (linked_list*)linked_list_get_nth(saved_messages, index_of_x1);
-				node = packet_list->head;
-				///go through all list and match a request, if so, add assoc to the package, unlock, lock the other list, add unluck and goodbye 
-				while(node)
-				{
-					stored_packet = (runmon_packet*)node->element;
-					stored_dns = (dns_packet*)stored_packet->protocol;
-					
-					if(dns->header->id == stored_dns->header->id && equal_queries(dns, stored_dns) && match_ports_and_IPs(packet, stored_packet) && timeval_isgreaterthan(packet->time, stored_packet->time)) //is response of x
-					{
-						stored_packet->associations++;
-						pthread_mutex_unlock(lock);
-				
-						lock = (pthread_mutex_t*)linked_list_get_nth(saved_messages_locks, index_of_var);
-                                		pthread_mutex_lock(lock);
-						packet_list = (linked_list*)linked_list_get_nth(saved_messages, index_of_var);
-						packet->reference_count++;
-						linked_list_add(packet->dependencies, stored_packet);
-						linked_list_add(packet_list, packet);
-						pthread_mutex_unlock(lock);
-	//CONSIDER DROPPING the packages with old TTL and get this new? or which equeal request response to conserve? 
-						return;
-					}
-					node = node->next;
-				}
-                                pthread_mutex_unlock(lock);
-			}
-		break;
-		case LN_REQ_NF_ADS_EQQ: //check if it is a DNS request not from the ADS PO and save it in the LL if there is a response that already have the same queries.
-			index_of_var = 2;
-			if(DNS_QR(dns->header) == 0 && strcasecmp(packet->PO,ADS_PO) != 0)
-			{
-				lock = (pthread_mutex_t*)linked_list_get_nth(saved_messages_locks, index_of_y1);		
-				pthread_mutex_lock(lock);packet_list = (linked_list*)linked_list_get_nth(saved_messages, index_of_y1);
-				node = packet_list->head;
-				while(node)
-                                {
-                                        stored_packet = (runmon_packet*)node->element;
-                                        stored_dns = (dns_packet*)stored_packet->protocol;
-					
-					if(equal_queries(dns, stored_dns) && timeval_isgreaterthan(packet->time, stored_packet->time))
-					{
-						stored_packet->associations++;
-                                                pthread_mutex_unlock(lock);
-						
-						lock = (pthread_mutex_t*)linked_list_get_nth(saved_messages_locks, index_of_var);
-                                                pthread_mutex_lock(lock);
-                                                packet_list = (linked_list*)linked_list_get_nth(saved_messages, index_of_var);
-                                                packet->reference_count++;
-                                                linked_list_add(packet->dependencies, stored_packet);
-                                                linked_list_add(packet_list, packet);
-                                                pthread_mutex_unlock(lock);
-                                                return;
-					}
-					
-				 	node = node->next;
-				}	
-				pthread_mutex_unlock(lock);
-			}
-		break;
-		case LN_RES_NF_ADS_EQA:
-			index_of_var = 3;
-			if(DNS_QR(dns->header) == 1 && strcasecmp(packet->PO,ADS_PO) != 0)
-			{
-				lock = (pthread_mutex_t*)linked_list_get_nth(saved_messages_locks, index_of_a1);
-                                pthread_mutex_lock(lock);
-				packet_list = (linked_list*)linked_list_get_nth(saved_messages, index_of_a1);
-				node = packet_list->head;
-                                while(node)
-                                {
-                                        stored_packet = (runmon_packet*)node->element;
-                                        stored_dns = (dns_packet*)stored_packet->protocol;
-					if(dns->header->id == stored_dns->header->id && equal_queries(dns, stored_dns) && match_ports_and_IPs(packet, stored_packet) && timeval_isgreaterthan(packet->time, stored_packet->time)) //is response of a
-					{
-						//compare y packet responses, get y, compare the answers report a veredict.
-						auxiliary_packet = (runmon_packet*)linked_list_get(stored_packet->dependencies); //this is y
-						auxiliary_packet2 = (runmon_packet*)linked_list_get(auxiliary_packet->dependencies);
-						//we conclude something here about some property, no need for re-report in case of emptying packages
-						auxiliary_packet2->completed_properties[get_property_of_variable(index_of_var)] = TRUE;
-						auxiliary_packet->completed_properties[get_property_of_variable(index_of_var)] = TRUE;
-						stored_packet->completed_properties[get_property_of_variable(index_of_var)] = TRUE;
-						packet->completed_properties[get_property_of_variable(index_of_var)] = TRUE;
-						//report here and then delete necesary a packets
-						if(equal_answers((dns_packet*)auxiliary_packet->protocol, dns))
-						{
-							if(DEBUG)
-								printf("--Pass verdict--\n\tMessages(in trace): %i, %i, %i, %i complete property %i.\n\n", auxiliary_packet2->location_in_trace, auxiliary_packet->location_in_trace, stored_packet->location_in_trace, packet->location_in_trace, 1);
-							pass_verdicts[0]++;
-							current_status[0] = CURRENT_STATUS_PASS;
-						}
-						else
-						{
-							if(DEBUG)
-                                                                printf("--Fail verdict--\n\tMessages(in trace): %i, %i, %i, %i fail property: %i.\n\n", auxiliary_packet2->location_in_trace, auxiliary_packet->location_in_trace, stored_packet->location_in_trace, packet->location_in_trace, 1);	
-							fail_verdicts[0]++;
-							current_status[0] = CURRENT_STATUS_FAIL;
-						}
-						if(--stored_packet->reference_count == 0 && stored_packet->associations == 0)//no need for this packet release
-                                                        release_runmon_packet((runmon_packet*)linked_list_delete_nth(packet_list, i));
-						else
-                                                        linked_list_delete_nth(packet_list, i);//not remove the packet itself, but, just from the LL
-						pthread_mutex_unlock(lock);
-						return;
-					}
-					node = node->next;
-					i++;
-				}
-				pthread_mutex_unlock(lock);
-			}
-		break;
-		default:
-			return;
-			//No default
-	}
-}
-
 struct timeval *last_observed_time; //last observed time                                                               |        {
 pthread_mutex_t *last_observed_time_lock; //to guarantee thread safe of time reading and writing. 
 
-void process_packet(int property_count, struct pcap_pkthdr *pkthdr, u_char *packet)
+void process_packet(int property_count, struct pcap_pkthdr *pkthdr, u_char *pkt)
 {
 	static count = 0;
 	static struct timeval *offset;
@@ -896,13 +241,14 @@ void process_packet(int property_count, struct pcap_pkthdr *pkthdr, u_char *pack
 	tcph *tcp = NULL;
 	udph *udp = NULL;
 	void *protocol = NULL;
-	runmon_packet *message = (runmon_packet*)malloc(sizeof(runmon_packet));
+	packet *message = (packet*)malloc(sizeof(packet));
 	transport_e packet_transport;
 	protocol_e packet_protocol;
 	int i =0; //DELETE probably since it will be for each leaf not each static leaf
 	BOOL packet_kept = FALSE;
 	BOOL *completed_properties = (BOOL*)malloc(property_count * sizeof(BOOL));
 	u_short source_port = 0, destination_port = 0;
+	size_t payload_size = 0;
 	
 	if(count == 0)
 	{
@@ -927,14 +273,14 @@ void process_packet(int property_count, struct pcap_pkthdr *pkthdr, u_char *pack
 		return;
 	}
 
-	ether = (ethernet_h*)packet;
+	ether = (ethernet_h*)pkt;
 	if (ether->ether_type != ETHERNET_IPv4_TYPE)
 	{
 		//LOG this!
 		return;
 	}
 	
-	ip = (ip4*)(packet + ETHERNET_HEADER_SIZE);
+	ip = (ip4*)(pkt + ETHERNET_HEADER_SIZE);
 		
 	//Leaving this here for future PO cathegorization... 
 	inet_ntop(AF_INET, &ip->ip_src, ip_source, INET_ADDRSTRLEN);
@@ -942,14 +288,14 @@ void process_packet(int property_count, struct pcap_pkthdr *pkthdr, u_char *pack
 	
 	if (ip->ip_p == IP_PROTO_UDP)
 	{
-		udp = (udph*)(packet + ETHERNET_HEADER_SIZE + (IP_HL(ip) * 4)); //* 4 because size expressed in 32bit 
-		payload = (u_char*)(packet + ETHERNET_HEADER_SIZE + (IP_HL(ip) * 4) + UDP_HEADER_SIZE); //* 4 because size expressed in 32bit  
+		udp = (udph*)(pkt + ETHERNET_HEADER_SIZE + (IP_HL(ip) * 4)); //* 4 because size expressed in 32bit 
+		payload = (u_char*)(pkt + ETHERNET_HEADER_SIZE + (IP_HL(ip) * 4) + UDP_HEADER_SIZE); //* 4 because size expressed in 32bit  
 		packet_transport = UDP;
 	}	 
 	else if (ip->ip_p == IP_PROTO_TCP)
 	{
-		tcp = (tcph*)(packet + ETHERNET_HEADER_SIZE + (IP_HL(ip) * 4)); //* 4 because size expressed in 32bit 
-		payload = (u_char*)(packet + ETHERNET_HEADER_SIZE + (IP_HL(ip) * 4) + (TH_OFF(tcp) * 4)); //* 4 because size expressed in 32bit 
+		tcp = (tcph*)(pkt + ETHERNET_HEADER_SIZE + (IP_HL(ip) * 4)); //* 4 because size expressed in 32bit 
+		payload = (u_char*)(pkt + ETHERNET_HEADER_SIZE + (IP_HL(ip) * 4) + (TH_OFF(tcp) * 4)); //* 4 because size expressed in 32bit 
 		packet_transport = TCP;
 	}
 	else
@@ -958,26 +304,12 @@ void process_packet(int property_count, struct pcap_pkthdr *pkthdr, u_char *pack
 		return;
 	}
 
-	//printf("%d) length=%d time=%d.%d. from:%s:%d to:%s:%d transport:%s \n", ++count, pkthdr->len, result->tv_sec, result->tv_usec, ip_source, ntohs((udp)?udp->uh_sport:tcp->th_sport), ip_dest, ntohs((udp)?udp->uh_dport:tcp->th_dport), (udp)?"UDP":"TCP"); //interested in all packages?
+	payload_size = pkthdr->len - (payload - pkt);
+
 	source_port = ntohs((udp)?udp->uh_sport:tcp->th_sport);
         destination_port = ntohs((udp)?udp->uh_dport:tcp->th_dport);
 	
-	//WHERE TO SEND THIS? I mean choose depending on ports and so on...
-        if(source_port == SIP_PORT || destination_port == SIP_PORT)
-        {
-                packet_protocol = SIP;
-                protocol = process_sip(payload, pkthdr->len - (payload - packet));
-        }
-        else if(source_port == DNS_PORT || destination_port == DNS_PORT)
-	{
-		packet_protocol = DNS;
-		protocol = process_dns(payload, pkthdr->len - (payload - packet));
-	}
-	else
-	{
-		//LOG THIS!
-	}
-	
+	/*EXAMPLE, how to set the point of observation*/
 	if(strcmp(ip_source, "62.73.5.128") == 0 || strcmp(ip_dest, "62.73.5.128") == 0 || strcmp(ip_source, "62.73.5.21") == 0 || strcmp(ip_dest, "62.73.5.21") == 0)
 		message->PO = "ADS";
 	else
@@ -985,6 +317,9 @@ void process_packet(int property_count, struct pcap_pkthdr *pkthdr, u_char *pack
 
 
 	memset(completed_properties, 0, sizeof(BOOL) * property_count);
+
+	//set protocol in here
+	//packet_protocol = ? depending on data? depending on port?
 	
 	//add all message parts
 	message->ethernet = ether;	
@@ -999,7 +334,7 @@ void process_packet(int property_count, struct pcap_pkthdr *pkthdr, u_char *pack
 	message->dependencies = create_linked_list();
 	message->completed_properties = completed_properties;
 	message->pkthdr = pkthdr;
-	message->data = packet;
+	message->data = pkt;
 		
 	switch(packet_transport)
 	{
@@ -1010,35 +345,17 @@ void process_packet(int property_count, struct pcap_pkthdr *pkthdr, u_char *pack
 			message->transport = tcp;
 	}
 
-	if(message->protocol == NULL)
-	{
-		release_runmon_packet(message);
-		if(DEBUG)
-			printf("--CORRUPT PACKET--\n\tMessage(in trace): %i\n\n", count);
-		return;
-	}
+	//
+	printf("%d) length=%d time=%d.%d. from:%s:%d to:%s:%d transport:%s \n", ++count, pkthdr->len, result->tv_sec, result->tv_usec, ip_source, ntohs((udp)?udp->uh_sport:tcp->th_sport), ip_dest, ntohs((udp)?udp->uh_dport:tcp->th_dport), (udp)?"UDP":"TCP"); //interested in all packages?
 
-	if(message->protocol_type == DNS)
-	{
-		//print_dns((dns_packet*)message->protocol);
-		for (i = 0; i < 4; i++)
-			match_packet_against_leafnode(i, message);
-		if(message->reference_count == 0)
-                	release_runmon_packet(message);//not interested in this packet
-		return;
-	}
+	//DO SOMETHING WITH THE PACKET, do something with the packet. Store, etc. you can use payload and payload_size	
+	//shall we call for an extern function here? like that people can use it
 
-/*	for (i = 0; i < 2 * VARIBLES_AMMOUNT_TO_BE_SAVED; i++)
-		packet_kept |= match_packet_vs_leafnode(i, message);
-	if(message->reference_count == 0)
-		release_runmon_packet(message);//not interested in this packet
-*/
+	release_packet(message);
 }
 
 void *serve_conn(void *serve_conn_ptr)//make sure this is threadable, should be from the point of view that we are serving different BIOs, but, underlying data structures should be considered
 {
-	//2implement... for now echo server
-		
 	u_char *message;
 	serve_conn_t *sct = (serve_conn_t*)serve_conn_ptr;
 	int buffersize = sct->buffersize;
@@ -1159,225 +476,136 @@ void *serve_conn(void *serve_conn_ptr)//make sure this is threadable, should be 
 }
 
 BOOL still_running; //variable used to indicate if the monitoring is still in progress.
-BOOL *keep_old_messages; //variable to specify special conditions of messages kept unless replaced by new ones
 
-/*
- * compare_DNS_answers: function that determines if DNS answers are the same
- */
-BOOL compare_DNS_answers(runmon_packet *p1, runmon_packet *p2)
+void print_help(char *progname)
 {
-	dns_packet *dns1 = NULL, *dns2 = NULL;
-	if(p1->protocol_type != DNS || p2->protocol_type != DNS)
-		return FALSE;
-	dns1 = (dns_packet*)p1->protocol;
-	dns2 = (dns_packet*)p2->protocol;
-	return (equal_queries(dns1,dns2) && equal_answers(dns1, dns2));
+	printf("Usage %s: [-h|--help|--h] [-bs buffsize] [-ip ipaddress] [-pt port] <-cf cerfile> <-kf keyfile> ", progname);
+	printf("\t\t-h|--help|-h\n\t\t\tPrints this message; the program's help.\n");
+	printf("\t\t-bs buffsize [default=2048]\n\t\t\tSize of the buffer for processing the transmited network packets; typically it should be greater than the network's MTU (usually > 1500) + time data (16).\n");
+	printf("\t\t-ip ipaddress [default=0.0.0.0, i.e., all ipv4 addresses of the host]\n\t\t\t The IP address to bind the service to.\n");
+	printf("\t\t-pt port [default=26965]\n\t\t\t The TCP port to bind the service.\n");
+	printf("\t\t-cf certfile\n\t\t\t SSL certificate to serve the connections.\n");
+	printf("\t\t-kf keyfile\n\t\t\t private SSL key to serve the connections.\n");
 }
 
-/*
- * empty_equal_kept_messages: auxiliary function to delete duplicated un-associated messages non thread-safe
- */
-void empty_equal_kept_messages (linked_list *ll, BOOL (*comp_func)(runmon_packet*, runmon_packet*))
+unsigned char is_int (char *string)
 {
-	linked_list_node *node = ll->head, *aux = NULL;
-	runmon_packet *packet = NULL, *compare = NULL;
-	int i = 0, j = 0;
-
-	while (node)
-	{
-		aux = node->next;
-		packet = (runmon_packet*)node->element;
-		j = i + 1;
-		node = node->next;
-		while(aux)
-		{
-			compare = (runmon_packet*)aux->element;
-			aux = aux->next;
-			if(comp_func(packet, compare))
-			{
-				if(timeval_isgreaterthan(packet->time, compare->time))
-				{
-					if(!compare->associations)//all necesary to delete this packet 
-					{
-						if(--compare->reference_count == 0)
-							release_runmon_packet((runmon_packet*)linked_list_delete_nth(ll, j));
-						else 	
-							linked_list_delete_nth(ll, j);
-						j--;
-					}	
-				}
-				else if(timeval_isgreaterthan(compare->time, packet->time))
-				{
-					if(!packet->associations)
-					{
-						if(--packet->reference_count == 0)
-							release_runmon_packet((runmon_packet*)linked_list_delete_nth(ll, i));
-                                                else
-                                                        linked_list_delete_nth(ll, i);
-						i--;
-						break;
-					}
-				}
-			}
-			j++;
-		}
-		i++;
-	}
+        size_t i = 0;
+        while (string[i])
+                if(string[i] <= 47 || string[i++] >=58)
+                        return 0;
+        return 1;
 }
 
-/*
- * empty_old_messages: function that purges the message lists, the timeout variable is used to purge messages that are older than that time in usecs
- */
-void empty_old_messages(unsigned long timeout_usec)
+char *certificate_file=NULL;
+char *private_key_file=NULL;
+unsigned int buffersize = 2048;
+char *ip_address_string = "0.0.0.0"; 
+char *port_string = "26965"; //TSP base 30
+
+void parse_args(char **argv, int argc)
 {
-	linked_list_node *node = saved_messages->head;
-	linked_list_node *lock_node = saved_messages_locks->head;
-	linked_list_node *packet_node = NULL;
-	linked_list *packet_list = NULL;
-	pthread_mutex_t *lock = NULL;
-	runmon_packet *packet = NULL;
-	int i = 0, j = 0;
-	unsigned long last_packet_time = 0;
-
-        pthread_mutex_lock(last_observed_time_lock);
-        last_packet_time = last_observed_time->tv_sec * 1000000 + last_observed_time->tv_usec;
-        pthread_mutex_unlock(last_observed_time_lock);
-
-	while(node)
+	size_t i = 0;
+	while(i < argc)
 	{
-		lock = (pthread_mutex_t*)lock_node->element;
-		pthread_mutex_lock(lock);
-		packet_list = (linked_list*)node->element;
-		packet_node = packet_list->head;	
-		j = -1;
-		
-		if(keep_old_messages[i])
+		if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help") || !strcmp(argv[i], "--h")) 
 		{
-			empty_equal_kept_messages(packet_list, compare_DNS_answers);
-			packet_node = NULL;
+			print_help();
+			exit(0);
 		}
-
-		while(packet_node)
-		{
-			j++;
-			packet = (runmon_packet*)packet_node->element;
-			packet_node = packet_node->next;
-
-			if(packet->associations && timeout_usec && (packet->time->tv_sec * 1000000 + packet->time->tv_usec + timeout_usec >= last_packet_time)) // if timeout is 0 means delete all anyway
-				continue; // this means if packet is still meant to be in the queues
-	
-			if(!packet->completed_properties[get_property_of_variable(i)] && timeout_usec > 0) 
+		else if (!strcmp(argv[i], "-bs"))
+		{	
+			if (i != argc -1)
 			{
-				if(DEBUG)
-					printf("--FAIL verdict--\n\tMessage(in trace): %i, incomplete in property %i.\n\n", packet->location_in_trace, i + 1);
-                        	fail_verdicts[get_property_of_variable(i)]++;
-				current_status[get_property_of_variable(i)] = CURRENT_STATUS_FAIL;
+				if(! is_int[argv[++i]])
+				{
+i					printf("Error! buffersize, the expected parameter after the -bs flag must be an integer, value: %s\n", argv[i]);
+					print_help(argv[0]);
+					exit(1);
+				}
+				sscanf(argv[i], "%lu", &buffersize);
 			}
-			else if(!packet->completed_properties[get_property_of_variable(i)] && timeout_usec == 0)
+			else 
 			{
-				if(DEBUG)
-					printf("--Inconclusive verdict--\n\tMessage(in trace): %i, incomplete in property %i.\n\n", packet->location_in_trace, i + 1);
-				//report inconclusive??
+				printf("Error! expected buffersize after the -bs flag.\n");
+				print_help(argv[0]);
+				exit(1);	
 			}
-                        if(--packet->reference_count == 0)//no need for this packet release
-                                release_runmon_packet(packet);
-                       	linked_list_delete_nth(packet_list, j);
-			j--; //still transversing the ll, so, we need to set the new pointer location back since last packet was deleted
 		}
 		
-		pthread_mutex_unlock(lock);
-		node = node->next;
-		lock_node = lock_node->next;
-		i++;
-	}
-}
-
-/*
- * fail_timeout_func function for the fail timeout thread, takes as the parameter the time 
- */
-
-void *fail_timeout_func(void *param)
-{
-	unsigned long timeout = *((unsigned long*)param);
-	while(TRUE)
-	{
-		usleep(timeout);
-		if(still_running)
-			empty_old_messages(timeout);	
-		else
-			break;
-	}
-	return NULL;
-}
-
-/*
- * print_status: function to display the current status to stdout
- */
-
-void print_status(int property_count)
-{
-	//static int chars_to_delete = 0;
-	int i;
-	static const char *header = "Status:\n";
-	static const char *property = "\tProperty %i:\n\t\tCurrent Status:%s\n\t\tPass verdicts:%i\n\t\tFail Verdicts:%i\n";
-	static const char *pass_str = "PASS";
-	static const char *fail_str = "FAIL";
-	static const char *inconclusive_str = "INCONCLUSIVE";
-	char *curr_status = NULL;
-
-	system("clear");
-	printf(header);
-	
-	for (i = 0; i < property_count; i++)
-	{
-		switch(current_status[i])
-		{
-			case CURRENT_STATUS_FAIL: 
-				curr_status = (char*)fail_str;
-				break;
-			case CURRENT_STATUS_PASS:
-				curr_status = (char*)pass_str;
-				 break;
-			default:
-                                curr_status = (char*)inconclusive_str;
+		else if (!strcmp(argv[i], "-ip"))
+		{	
+			if (i != argc -1)
+			{
+				//IP function will report error by itself, do not worry about checking the IP format.
+				sscanf(argv[++i], "%s", &ip_address_string);
+			}
+			else 
+			{
+				printf("Error! expected IP address string after the -ip flag.\n");
+				print_help(argv[0]);
+				exit(1);	
+			}
 		}
-		printf(property, i + 1, curr_status, pass_verdicts[i], fail_verdicts[i]);
-	}	
-}
-
-/*
- * report_status: function for a thread to report status periodically
- */
-void *report_status(void *param)
-{
-	report_status_t *rst = (report_status_t*)param;
 	
-	 
-	while(TRUE)
-	{
-		usleep(rst->period);
-		if(still_running)
-			print_status(rst->properties_count);
-		else
-			break;
+		else if (!strcmp(argv[i], "-pt"))
+		{	
+			if (i != argc -1)
+			{
+				if(! is_int[argv[++i]])
+				{
+i					printf("Error! buffersize, the expected parameter after the -pt flag must be an integer, value: %s\n", argv[i]);
+					print_help(argv[0]);
+					exit(1);
+				}
+				sscanf(argv[i], "%s", &port_string);
+			}
+			else 
+			{
+				printf("Error! expected port number after the -pt flag.\n");
+				print_help(argv[0]);
+				exit(1);	
+			}
+		}
+
+		else if (!strcmp(argv[i], "-cf"))
+		{	
+			if (i != argc -1)
+			{
+				//
+				sscanf(argv[++i], "%s", &certificate_file);
+			}
+			else 
+			{
+				printf("Error! expected certificate file name (path) after the -cf flag.\n");
+				print_help(argv[0]);
+				exit(1);	
+			}
+		}
+	
+		else if (!strcmp(argv[i], "-kf"))
+		{	
+			if (i != argc -1)
+			{
+				//IP function will report error by itself, do not worry about checking the IP format.
+				sscanf(argv[++i], "%s", &certificate_file);
+			}
+			else 
+			{
+				printf("Error! expected certificate file name (path) after the -cf flag.\n");
+				print_help(argv[0]);
+				exit(1);	
+			}
+		}
+
+		i++;	
 	}
-	return NULL;
 }
 
-#define FAIL_TIMEOUT_TIME 16*1000000
-#define REPORT_STATUS_PERIOD 2000000
 
+	
 int main(char **argv, int argc)
 {
-	//all this params should be read from a conf file...
-	char *certificate_file = "./server.crt";
-	char *private_key_file = "./server.key";
-	int buffersize = 4096;
-	char *ip_address_string = "0.0.0.0"; //2change from host to host
-	char *port_string = "26965"; //TSP base 30
-	
-	//pcap filter as well
-	//...............
 	SSL_CTX *ctx = NULL;
 	SSL *ssl = NULL;
 	BIO *bio = NULL;
@@ -1394,9 +622,6 @@ int main(char **argv, int argc)
 	serve_conn_t *sct = NULL;
 	int thread_status;
 	int properties_count = 1, i;
-	report_status_t *rst = malloc(1 * sizeof(report_status_t));
-        int stored_variables_count = VARIBLES_AMMOUNT_TO_BE_SAVED;
-	unsigned long fail_timeout_time = FAIL_TIMEOUT_TIME;
 	linked_list *packet_list = NULL;
 
 
@@ -1420,43 +645,6 @@ int main(char **argv, int argc)
         last_observed_time_lock = (pthread_mutex_t*)malloc(1 * sizeof(pthread_mutex_t));
         pthread_mutex_init(last_observed_time_lock, NULL);
 	
-	rst->period = REPORT_STATUS_PERIOD;
-        rst->properties_count = properties_count;
-
-	saved_messages = create_linked_list();
-        saved_messages_locks = create_linked_list();
-        keep_old_messages = (BOOL*)malloc(stored_variables_count * sizeof(BOOL));
-
-        for (i = 0; i < stored_variables_count; i++)
-        {
-                packet_list = create_linked_list();
-                linked_list_add(saved_messages, packet_list);
-
-                lock = (pthread_mutex_t*)malloc(sizeof(pthread_mutex_t) * 1);
-                pthread_mutex_init(lock, NULL);
-                linked_list_add(saved_messages_locks, lock);
-
-                keep_old_messages[i] = 0;
-        }
-	//this should be a function call depending on the var to keep or not the messages
-	keep_old_messages[1] = 1;
-
-	pass_verdicts = (unsigned long long*)malloc(sizeof(unsigned long long) * properties_count);
-	memset(pass_verdicts, 0, sizeof(unsigned long long) * properties_count);
-	fail_verdicts = (unsigned long long*)malloc(sizeof(unsigned long long) * properties_count);
-	memset(fail_verdicts, 0, sizeof(unsigned long long) * properties_count);
-	
-	current_status = (char*)malloc(sizeof(char) * properties_count);
-        for (i = 0; i < properties_count; i++)
-                current_status[i] = CURRENT_STATUS_INCONCLUSIVE;
-
-	pthread_create(&timeout_checker_thread, NULL, &fail_timeout_func, &fail_timeout_time);
-        pthread_create(&report_status_thread, NULL, &report_status, rst);
-        pthread_detach(timeout_checker_thread);
-        pthread_detach(report_status_thread);
-
-	still_running = TRUE;
-
 	while (TRUE)
 	{
 		addr = (struct sockaddr_in*)malloc(1 * *len);

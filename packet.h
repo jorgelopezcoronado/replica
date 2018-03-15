@@ -1,5 +1,5 @@
 /*
- * runmon.h: define runmun structures
+ * packet.h: define runmun structures
  */
 #include "linked_list.h"
 #include "ethernet.h"
@@ -40,7 +40,7 @@ typedef enum stream_state_tag
 	A_LEN = 6
 }stream_state_e;
 
-typedef struct runmon_packet_tag
+typedef struct packet_tag
 {
 	ethernet_h *ethernet;
 	ip4 *ip;
@@ -57,7 +57,7 @@ typedef struct runmon_packet_tag
 	BOOL *completed_properties;
 	struct pcap_pkthdr *pkthdr;
 	u_char *data;
-}runmon_packet;
+}packet;
 
 typedef struct report_status_t_tag
 {
