@@ -1,4 +1,4 @@
-CFLAGS=-O3 -lpcap -pthread -lssl
+CFLAGS=-O3 -lpcap -pthread -lssl -g
 BINDIR=/usr/local/bin
 CLIENT=repliclient
 SERVER=repliserver

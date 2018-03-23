@@ -505,21 +505,23 @@ char *port_string = "26965"; //TSP base 30
 
 void parse_args(char **argv, int argc)
 {
-	size_t i = 0;
+	size_t i = 1;
+
 	while(i < argc)
 	{
 		if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help") || !strcmp(argv[i], "--h")) 
 		{
-			print_help();
+			print_help(argv[0]);
 			exit(0);
 		}
+
 		else if (!strcmp(argv[i], "-bs"))
 		{	
 			if (i != argc -1)
 			{
-				if(! is_int[argv[++i]])
+				if(! is_int(argv[++i]))
 				{
-i					printf("Error! buffersize, the expected parameter after the -bs flag must be an integer, value: %s\n", argv[i]);
+					printf("Error! buffersize, the expected parameter after the -bs flag must be an integer, value: %s\n", argv[i]);
 					print_help(argv[0]);
 					exit(1);
 				}
@@ -552,13 +554,14 @@ i					printf("Error! buffersize, the expected parameter after the -bs flag must 
 		{	
 			if (i != argc -1)
 			{
-				if(! is_int[argv[++i]])
+				if(! is_int(argv[++i]))
 				{
-i					printf("Error! buffersize, the expected parameter after the -pt flag must be an integer, value: %s\n", argv[i]);
+					printf("Error! buffersize, the expected parameter after the -pt flag must be an integer, value: %s\n", argv[i]);
 					print_help(argv[0]);
 					exit(1);
 				}
-				sscanf(argv[i], "%s", &port_string);
+				port_string = (char*)malloc(sizeof(char)*(strlen(argv[i]) + 1));
+				strcpy(port_string, argv[i]);
 			}
 			else 
 			{
@@ -572,8 +575,8 @@ i					printf("Error! buffersize, the expected parameter after the -pt flag must 
 		{	
 			if (i != argc -1)
 			{
-				//
-				sscanf(argv[++i], "%s", &certificate_file);
+				certificate_file = (char*)malloc(sizeof(char)*(strlen(argv[++i]) + 1));
+				strcpy(certificate_file, argv[i]);
 			}
 			else 
 			{
@@ -587,24 +590,39 @@ i					printf("Error! buffersize, the expected parameter after the -pt flag must 
 		{	
 			if (i != argc -1)
 			{
-				//IP function will report error by itself, do not worry about checking the IP format.
-				sscanf(argv[++i], "%s", &certificate_file);
+				private_key_file = (char*)malloc(sizeof(char)*(strlen(argv[++i]) + 1));
+				strcpy(private_key_file, argv[i]);
 			}
 			else 
 			{
-				printf("Error! expected certificate file name (path) after the -cf flag.\n");
+				printf("Error! expected private key file name (path) after the -kf flag.\n");
 				print_help(argv[0]);
 				exit(1);	
 			}
 		}
 
+		else
+		{
+			printf("Error! unrecognized option: %s.\n", argv[i]);
+			print_help(argv[0]);
+			exit(1);	
+		}
+
+
 		i++;	
+	}
+
+	if (!(certificate_file && private_key_file))
+	{
+		printf("Error! Certificate file and private key file must be suppled!\n");
+		print_help(argv[0]);
+		exit(2);
 	}
 }
 
 
 	
-int main(char **argv, int argc)
+int main(int argc, char **argv)
 {
 	SSL_CTX *ctx = NULL;
 	SSL *ssl = NULL;
@@ -624,7 +642,8 @@ int main(char **argv, int argc)
 	int properties_count = 1, i;
 	linked_list *packet_list = NULL;
 
-
+	parse_args(argv, argc);
+	
 	len = malloc(1 * sizeof(int));
 	*len = sizeof(struct sockaddr_in);
 	inet_aton(ip_address_string, IP_addrr); //check if DNS if possible here? 
@@ -639,6 +658,8 @@ int main(char **argv, int argc)
 	if (!ctx)
 		exit(1);
 	
+	printf("Listening on %s:%i using:\nCertificate file=%s\nPrivate key file=%s\n", ip_address_string, port, certificate_file, private_key_file);
+
 	last_observed_time = malloc(1 * sizeof(struct timeval));
 	last_observed_time->tv_sec = 0;
         last_observed_time->tv_usec = 0;
